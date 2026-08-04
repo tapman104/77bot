@@ -258,7 +258,7 @@ async function getGroupSettings(db, groupId) {
     console.error('Get settings error:', e);
   }
   return {
-    cooldown_seconds: 300,
+    cooldown_seconds: 0,
     report_threshold: 5,
     notification_chat_id: null,
     ignore_bots: 1
@@ -524,21 +524,23 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
 
   // Anti-Spam Check 5: Cooldown Verification
   const now = Math.floor(Date.now() / 1000);
-  const cooldownRow = await env.DB.prepare(
-    'SELECT last_report_time FROM user_cooldowns WHERE group_id = ? AND user_id = ?'
-  ).bind(chatId, reporter.id).first();
+  if (settings.cooldown_seconds > 0) {
+    const cooldownRow = await env.DB.prepare(
+      'SELECT last_report_time FROM user_cooldowns WHERE group_id = ? AND user_id = ?'
+    ).bind(chatId, reporter.id).first();
 
-  if (cooldownRow) {
-    const elapsed = now - cooldownRow.last_report_time;
-    if (elapsed < settings.cooldown_seconds) {
-      const waitTime = settings.cooldown_seconds - elapsed;
-      await sendTelegramMessage(
-        env.TELEGRAM_BOT_TOKEN,
-        chatId,
-        `⏳ Please wait ${Math.ceil(waitTime / 60)} minute(s) before submitting another report.`,
-        msg.message_id
-      );
-      return;
+    if (cooldownRow) {
+      const elapsed = now - cooldownRow.last_report_time;
+      if (elapsed < settings.cooldown_seconds) {
+        const waitTime = settings.cooldown_seconds - elapsed;
+        await sendTelegramMessage(
+          env.TELEGRAM_BOT_TOKEN,
+          chatId,
+          `⏳ Please wait ${Math.ceil(waitTime / 60)} minute(s) before submitting another report.`,
+          msg.message_id
+        );
+        return;
+      }
     }
   }
 
