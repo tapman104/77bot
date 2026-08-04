@@ -8,5 +8,3 @@ database_name = "report-bot-db"
 database_id = "7191d4e5-ce85-4078-9f11-2f29f9f39e96"
 
 [vars]
-# DEFAULT_ADMIN_CHAT_ID: fallback chat ID for admin report notifications if group has no notification_chat set
-DEFAULT_ADMIN_CHAT_ID = ""
