@@ -495,15 +495,9 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
     return;
   }
 
-  // Anti-Spam Check 2: Reject empty reasons
+  // Anti-Spam Check 2: Default empty reasons
   if (!reason || reason.trim().length === 0) {
-    await sendTelegramMessage(
-      env.TELEGRAM_BOT_TOKEN,
-      chatId,
-      '⚠️ Please provide a reason for your report.',
-      msg.message_id
-    );
-    return;
+    reason = 'No reason provided';
   }
 
   // Anti-Spam Check 3: Ignore self-reports
@@ -599,20 +593,54 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   await sendTelegramMessage(
     env.TELEGRAM_BOT_TOKEN,
     chatId,
-    `✅ Report submitted successfully. (Report ID: #${reportId})`,
+    `✅ Report received.`,
     msg.message_id
   );
 
   // Send Notification to Admins asynchronously using ctx.waitUntil
-  const adminAlertText = 
-    `🚨 New Report\n` +
-    `User: <b>${escapeHtml(targetUserStr)}</b>\n` +
-    `Reason: ${escapeHtml(reason)}\n` +
-    `Report ID: #${reportId}`;
-
   const destChatId = chatId;
-  const adminNotificationPromise = sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, destChatId, adminAlertText)
-    .catch(err => console.error('Failed to send admin notification:', err));
+  const adminNotificationPromise = (async () => {
+    let adminMentions = '';
+    try {
+      const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: destChatId })
+      });
+      const data = await res.json();
+      if (data.ok && data.result) {
+        const mentions = [];
+        for (const admin of data.result) {
+          const user = admin.user;
+          if (user.is_bot || admin.is_anonymous) continue;
+          if (user.username) {
+            mentions.push(`@${user.username}`);
+          } else {
+            mentions.push(`<a href="tg://user?id=${user.id}">${escapeHtml(user.first_name || 'Admin')}</a>`);
+          }
+        }
+        if (mentions.length > 0) {
+          adminMentions = `\n\n<b>Notify:</b> ${mentions.join(' ')}`;
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch admins for mentions:', err);
+    }
+
+    const reportedLink = targetUser.username 
+      ? `@${targetUser.username}` 
+      : `<a href="tg://user?id=${targetUser.id}">${escapeHtml(targetUserStr)}</a>`;
+
+    const adminAlertText = 
+      `🚨 <b>REPORT FILED</b> 🚨\n\n` +
+      `<b>Target User:</b> ${reportedLink}\n` +
+      `<b>Reason:</b> ${escapeHtml(reason)}\n\n` +
+      `<i>Report ID: #${reportId}</i>` +
+      adminMentions;
+
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, destChatId, adminAlertText);
+  })().catch(err => console.error('Failed to send admin notification:', err));
 
   if (ctx && typeof ctx.waitUntil === 'function') {
     ctx.waitUntil(adminNotificationPromise);
@@ -725,6 +753,13 @@ async function handleDismissReport(chatId, reportIdStr, env) {
  * COMMAND: /history @user or <user_id>
  */
 async function handleUserHistory(chatId, msg, argsStr, env) {
+  const chatType = msg.chat.type;
+
+  if (chatType === 'private' && !isOwner(msg.from.id, env)) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat or by the bot owner.');
+    return;
+  }
+
   let targetQuery = argsStr.trim();
   if (msg.reply_to_message) {
     const u = msg.reply_to_message.from;
@@ -741,18 +776,34 @@ async function handleUserHistory(chatId, msg, argsStr, env) {
   const isNumeric = /^\d+$/.test(cleanTarget);
 
   let results;
-  if (isNumeric) {
-    ({ results } = await env.DB.prepare(`
-      SELECT id, reason, status, created_at FROM reports
-      WHERE group_id = ? AND reported_id = ?
-      ORDER BY id DESC LIMIT 10
-    `).bind(chatId, parseInt(cleanTarget, 10)).all());
+  if (chatType === 'private') {
+    if (isNumeric) {
+      ({ results } = await env.DB.prepare(`
+        SELECT id, reason, status, created_at, group_name FROM reports
+        WHERE reported_id = ?
+        ORDER BY id DESC LIMIT 20
+      `).bind(parseInt(cleanTarget, 10)).all());
+    } else {
+      ({ results } = await env.DB.prepare(`
+        SELECT id, reason, status, created_at, group_name FROM reports
+        WHERE reported_username LIKE ?
+        ORDER BY id DESC LIMIT 20
+      `).bind(`%${cleanTarget}%`).all());
+    }
   } else {
-    ({ results } = await env.DB.prepare(`
-      SELECT id, reason, status, created_at FROM reports
-      WHERE group_id = ? AND reported_username LIKE ?
-      ORDER BY id DESC LIMIT 10
-    `).bind(chatId, `%${cleanTarget}%`).all());
+    if (isNumeric) {
+      ({ results } = await env.DB.prepare(`
+        SELECT id, reason, status, created_at FROM reports
+        WHERE group_id = ? AND reported_id = ?
+        ORDER BY id DESC LIMIT 10
+      `).bind(chatId, parseInt(cleanTarget, 10)).all());
+    } else {
+      ({ results } = await env.DB.prepare(`
+        SELECT id, reason, status, created_at FROM reports
+        WHERE group_id = ? AND reported_username LIKE ?
+        ORDER BY id DESC LIMIT 10
+      `).bind(chatId, `%${cleanTarget}%`).all());
+    }
   }
 
   if (!results || results.length === 0) {
@@ -762,7 +813,11 @@ async function handleUserHistory(chatId, msg, argsStr, env) {
 
   let text = `📜 <b>Report History for ${escapeHtml(targetQuery)}:</b>\n\n`;
   for (const r of results) {
-    text += `• <b>#${r.id}</b> | Status: ${r.status} | Reason: ${escapeHtml(r.reason)} (${r.created_at})\n`;
+    if (chatType === 'private') {
+      text += `• <b>#${r.id}</b> | Group: ${escapeHtml(r.group_name)} | Status: ${r.status} | Reason: ${escapeHtml(r.reason)} (${r.created_at})\n`;
+    } else {
+      text += `• <b>#${r.id}</b> | Status: ${r.status} | Reason: ${escapeHtml(r.reason)} (${r.created_at})\n`;
+    }
   }
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, text);
