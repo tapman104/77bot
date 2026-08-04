@@ -227,12 +227,8 @@ async function checkIsAdmin(botToken, chatId, userId, chatType, env) {
     const isTgAdmin = status === 'administrator' || status === 'creator';
     if (!isTgAdmin) return false;
 
-    // Step 2: D1 approved_admins lookup
-    const approved = await env.DB.prepare(
-      'SELECT user_id FROM approved_admins WHERE group_id = ? AND user_id = ?'
-    ).bind(chatId, userId).first();
-
-    return !!approved;
+    // Step 2: Treat any Telegram admin as approved (Fix 5)
+    return true;
   } catch (err) {
     console.error('Admin check failed:', err);
     return false;
@@ -345,7 +341,7 @@ async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env)
   }
 
   if (!targetUserId || isNaN(targetUserId)) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/approve &lt;user_id&gt;</code> or reply to a user.');
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/approve user_id</code> or reply to a user.');
     return;
   }
 
@@ -415,7 +411,7 @@ async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, en
   }
 
   if (!targetUserId || isNaN(targetUserId)) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/unapprove &lt;user_id&gt;</code> or reply to a user.');
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/unapprove user_id</code> or reply to a user.');
     return;
   }
 
@@ -608,17 +604,13 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   );
 
   // Send Notification to Admins asynchronously using ctx.waitUntil
-  const utcTime = new Date().toISOString().replace('T', ' ').substring(0, 16) + ' UTC';
   const adminAlertText = 
-    `🚨 <b>New Report</b>\n` +
-    `<b>Group:</b> ${escapeHtml(groupTitle)}\n` +
-    `<b>Reporter:</b> ${escapeHtml(reporterUserStr)}\n` +
-    `<b>Reported User:</b> ${escapeHtml(targetUserStr)}\n` +
-    `<b>Reason:</b> ${escapeHtml(reason)}\n` +
-    `<b>Report ID:</b> #${reportId}\n` +
-    `<b>Time:</b> ${utcTime}`;
+    `🚨 New Report\n` +
+    `User: <b>${escapeHtml(targetUserStr)}</b>\n` +
+    `Reason: ${escapeHtml(reason)}\n` +
+    `Report ID: #${reportId}`;
 
-  const destChatId = settings.notification_chat_id || env.DEFAULT_ADMIN_CHAT_ID || chatId;
+  const destChatId = chatId;
   const adminNotificationPromise = sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, destChatId, adminAlertText)
     .catch(err => console.error('Failed to send admin notification:', err));
 
@@ -938,8 +930,8 @@ async function handleHelp(chatId, env) {
     `• <code>/settings</code> - View & edit group settings\n` +
     `• <code>/export [json|csv]</code> - Export group reports\n` +
     `• <code>/clearreports</code> - Delete all group reports\n` +
-    `• <code>/approve &lt;user_id&gt;</code> - Approve a group admin\n` +
-    `• <code>/unapprove &lt;user_id&gt;</code> - Revoke admin approval\n` +
+    `• <code>/approve user_id</code> - Approve a group admin\n` +
+    `• <code>/unapprove user_id</code> - Revoke admin approval\n` +
     `• <code>/admins</code> - List approved group admins\n` +
     `• <code>/help</code> - Show this menu\n\n` +
     `<b>Owner Commands (Private Chat Only):</b>\n` +
