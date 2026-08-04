@@ -620,49 +620,62 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   );
 
   // Send Notification to Admins asynchronously using ctx.waitUntil
-  const destChatId = chatId;
   const adminNotificationPromise = (async () => {
-    let adminMentions = '';
     try {
-      const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: destChatId })
-      });
-      const data = await res.json();
-      if (data.ok && data.result) {
-        const mentions = [];
-        for (const admin of data.result) {
-          const user = admin.user;
-          if (user.is_bot || admin.is_anonymous) continue;
-          if (user.username) {
-            mentions.push(`@${user.username}`);
-          } else {
-            mentions.push(`<a href="tg://user?id=${user.id}">${escapeHtml(user.first_name || 'Admin')}</a>`);
+      let adminIds = [];
+      const { results: approvedAdmins } = await env.DB.prepare(
+        'SELECT user_id FROM approved_admins WHERE group_id = ?'
+      ).bind(chatId).all();
+
+      if (approvedAdmins && approvedAdmins.length > 0) {
+        adminIds = approvedAdmins.map(a => a.user_id);
+      } else {
+        const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId })
+        });
+        const data = await res.json();
+        if (data.ok && data.result) {
+          for (const admin of data.result) {
+            const user = admin.user;
+            if (user.is_bot || admin.is_anonymous) continue;
+            adminIds.push(user.id);
           }
         }
-        if (mentions.length > 0) {
-          adminMentions = `\n\n<b>Notify:</b> ${mentions.join(' ')}`;
+      }
+
+      const reportedLink = targetUser.username 
+        ? `@${targetUser.username}` 
+        : `<a href="tg://user?id=${targetUser.id}">${escapeHtml(targetUser.first_name || 'User ' + targetUser.id)}</a>`;
+
+      let messageLinkLine = '';
+      if (targetMessageId) {
+        const chatIdStr = chatId.toString();
+        const strippedChatId = chatIdStr.startsWith('-100') ? chatIdStr.substring(4) : chatIdStr;
+        messageLinkLine = `\n💬 <b>Message:</b> https://t.me/c/${strippedChatId}/${targetMessageId}`;
+      }
+
+      const adminAlertText = 
+        `🚨 <b>New Report</b>\n\n` +
+        `👤 <b>Reported:</b> ${reportedLink}\n` +
+        `📝 <b>Reason:</b> ${escapeHtml(reason)}\n` +
+        `🆔 <b>Report ID:</b> #${reportId}` +
+        messageLinkLine +
+        `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
+
+      for (const adminId of adminIds) {
+        try {
+          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, adminAlertText);
+        } catch (err) {
+          console.error(`Failed to send DM to admin ${adminId}:`, err);
         }
       }
     } catch (err) {
-      console.error('Failed to fetch admins for mentions:', err);
+      console.error('Failed to process admin notifications:', err);
     }
-
-    const reportedLink = targetUser.username 
-      ? `@${targetUser.username}` 
-      : `<a href="tg://user?id=${targetUser.id}">${escapeHtml(targetUserStr)}</a>`;
-
-    const adminAlertText = 
-      `🚨 <b>REPORT FILED</b> 🚨\n\n` +
-      `<b>Target User:</b> ${reportedLink}\n` +
-      `<b>Reason:</b> ${escapeHtml(reason)}\n\n` +
-      `<i>Report ID: #${reportId}</i>` +
-      adminMentions;
-
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, destChatId, adminAlertText);
-  })().catch(err => console.error('Failed to send admin notification:', err));
+  })();
 
   if (ctx && typeof ctx.waitUntil === 'function') {
     ctx.waitUntil(adminNotificationPromise);
