@@ -480,7 +480,26 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
     if (parts.length > 0 && parts[0].startsWith('@')) {
       const mention = parts[0];
       reason = parts.slice(1).join(' ');
-      targetUser = { id: 0, username: mention.replace('@', '') };
+      
+      try {
+        const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatMember`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, user_id: mention })
+        });
+        const data = await res.json();
+        if (data.ok && data.result && data.result.user) {
+          targetUser = data.result.user;
+        } else {
+          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Could not find that user in this group.', msg.message_id);
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to lookup user by username:', err);
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Could not find that user in this group.', msg.message_id);
+        return;
+      }
     }
   }
 
@@ -501,7 +520,8 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   }
 
   // Anti-Spam Check 3: Ignore self-reports
-  if (targetUser.id === reporter.id) {
+  const isSameUsername = targetUser.username && reporter.username && targetUser.username.toLowerCase() === reporter.username.toLowerCase();
+  if (targetUser.id === reporter.id || isSameUsername) {
     await sendTelegramMessage(
       env.TELEGRAM_BOT_TOKEN,
       chatId,
