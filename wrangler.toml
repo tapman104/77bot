@@ -1,0 +1,14 @@
+name = "telegram-report-bot"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "report-bot-db"
+database_id = "REPLACE_WITH_YOUR_DATABASE_ID"
+
+[vars]
+# DEFAULT_ADMIN_CHAT_ID: fallback chat ID for admin report notifications if group has no notification_chat set
+DEFAULT_ADMIN_CHAT_ID = ""
+# GLOBAL_ADMIN_IDS: comma-separated Telegram user IDs of bot owners, e.g. "123456789,987654321" — these bypass all admin approval checks
+GLOBAL_ADMIN_IDS = ""
