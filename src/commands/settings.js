@@ -14,10 +14,12 @@ export async function handleSettings(chatId, chatType, senderId, argsStr, env) {
       `⚙️ <b>Group Settings</b>\n\n` +
       `• <b>Cooldown:</b> ${current.cooldown_seconds}s\n` +
       `• <b>Ignore Bots:</b> ${current.ignore_bots ? 'Yes' : 'No'}\n` +
+      `• <b>Report Threshold:</b> ${current.report_threshold}\n` +
       `• <b>Notification Destination:</b> ${current.notification_chat_id || 'Current Group'}\n\n` +
       `<i>To update settings, use:</i>\n` +
       `<code>/settings cooldown 300</code>\n` +
       `<code>/settings ignore_bots 1</code>\n` +
+      `<code>/settings report_threshold 5</code>\n` +
       `<code>/settings notification_chat -100123456789</code>`;
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, text);
     return;
@@ -28,8 +30,12 @@ export async function handleSettings(chatId, chatType, senderId, argsStr, env) {
   const val = parts[1];
 
   // Fix 5 (Audit): Added updated_at = CURRENT_TIMESTAMP to all DO UPDATE SET clauses
-  if (key === 'cooldown' && !isNaN(val)) {
+  if (key === 'cooldown' && /^\d+$/.test(val)) {
     const cd = parseInt(val, 10);
+    if (cd < 0) {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Cooldown must be 0 or greater.');
+      return;
+    }
     await env.DB.prepare(`
       INSERT INTO group_settings (group_id, cooldown_seconds) VALUES (?, ?)
       ON CONFLICT(group_id) DO UPDATE SET cooldown_seconds = excluded.cooldown_seconds, updated_at = CURRENT_TIMESTAMP
@@ -42,7 +48,18 @@ export async function handleSettings(chatId, chatType, senderId, argsStr, env) {
       ON CONFLICT(group_id) DO UPDATE SET ignore_bots = excluded.ignore_bots, updated_at = CURRENT_TIMESTAMP
     `).bind(chatId, ib).run();
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ Ignore bots updated to ${ib === 1 ? 'Yes (1)' : 'No (0)'}.`);
-  } else if (key === 'notification_chat' && !isNaN(val)) {
+  } else if (key === 'report_threshold' && /^\d+$/.test(val)) {
+    const rt = parseInt(val, 10);
+    if (rt < 1) {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Report threshold must be at least 1.');
+      return;
+    }
+    await env.DB.prepare(`
+      INSERT INTO group_settings (group_id, report_threshold) VALUES (?, ?)
+      ON CONFLICT(group_id) DO UPDATE SET report_threshold = excluded.report_threshold, updated_at = CURRENT_TIMESTAMP
+    `).bind(chatId, rt).run();
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ Report threshold updated to ${rt}.`);
+  } else if (key === 'notification_chat' && /^-?\d+$/.test(val)) {
     const destId = parseInt(val, 10);
     await env.DB.prepare(`
       INSERT INTO group_settings (group_id, notification_chat_id) VALUES (?, ?)

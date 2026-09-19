@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS user_cooldowns (
 );
 
 -- Indexes for optimal querying
-CREATE INDEX IF NOT EXISTS idx_reports_group ON reports(group_id);
+CREATE INDEX IF NOT EXISTS idx_reports_group_message ON reports(group_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_reports_group_reported_status ON reports(group_id, reported_id, status);
 CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
 CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports(reported_id);
 CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports(reporter_id);
@@ -59,5 +60,5 @@ CREATE TABLE IF NOT EXISTS approved_admins (
     PRIMARY KEY (group_id, user_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_approved_admins_group ON approved_admins(group_id);
+
 

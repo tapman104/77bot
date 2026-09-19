@@ -4,7 +4,7 @@ export async function handleHelp(chatId, env) {
   const text = 
     `🛡️ <b>Telegram Report Bot - Administrator Manual</b>\n\n` +
     `<b>Public Commands:</b>\n` +
-    `• <code>/report [reason]</code> - Report user by reply or <code>/report @username [reason]</code>\n\n` +
+    `• <code>/report [reason]</code> - Reply to a message to report the user\n\n` +
     `<b>Admin Commands:</b>\n` +
     `• <code>/reports</code> - List open reports\n` +
     `• <code>/view &lt;ID&gt;</code> - View full report details (or <code>/report &lt;ID&gt;</code>)\n` +

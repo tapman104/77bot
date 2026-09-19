@@ -6,24 +6,28 @@ export async function handleStats(chatId, chatType, senderId, env) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to administrators.');
     return;
   }
-  const totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ?').bind(chatId).first();
-  const openRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "open"').bind(chatId).first();
-  const resolvedRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "resolved"').bind(chatId).first();
+  const summaryRow = await env.DB.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open,
+      SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved
+    FROM reports WHERE group_id = ?
+  `).bind(chatId).first();
 
-  const { results: topReported } = await env.DB.prepare(`
-    SELECT reported_id, MAX(reported_username) AS reported_username, COUNT(*) AS cnt FROM reports 
-    WHERE group_id = ? GROUP BY reported_id ORDER BY cnt DESC LIMIT 3
-  `).bind(chatId).all();
+  const [topReportedRes, topReportersRes] = await Promise.all([
+    env.DB.prepare(`SELECT reported_id, MAX(reported_username) AS reported_username, COUNT(*) AS cnt
+      FROM reports WHERE group_id = ? GROUP BY reported_id ORDER BY cnt DESC LIMIT 3`).bind(chatId).all(),
+    env.DB.prepare(`SELECT reporter_id, MAX(reporter_username) AS reporter_username, COUNT(*) AS cnt
+      FROM reports WHERE group_id = ? GROUP BY reporter_id ORDER BY cnt DESC LIMIT 3`).bind(chatId).all()
+  ]);
 
-  const { results: topReporters } = await env.DB.prepare(`
-    SELECT reporter_id, MAX(reporter_username) AS reporter_username, COUNT(*) AS cnt FROM reports 
-    WHERE group_id = ? GROUP BY reporter_id ORDER BY cnt DESC LIMIT 3
-  `).bind(chatId).all();
+  const topReported = topReportedRes.results;
+  const topReporters = topReportersRes.results;
 
   let text = `📊 <b>Group Moderation Statistics</b>\n\n` +
-    `• <b>Total Reports:</b> ${totalRow ? totalRow.count : 0}\n` +
-    `• <b>Open Reports:</b> ${openRow ? openRow.count : 0}\n` +
-    `• <b>Resolved Reports:</b> ${resolvedRow ? resolvedRow.count : 0}\n\n` +
+    `• <b>Total Reports:</b> ${summaryRow ? summaryRow.total : 0}\n` +
+    `• <b>Open Reports:</b> ${summaryRow ? summaryRow.open : 0}\n` +
+    `• <b>Resolved Reports:</b> ${summaryRow ? summaryRow.resolved : 0}\n\n` +
     `<b>Most Reported Users:</b>\n`;
 
   if (topReported && topReported.length > 0) {

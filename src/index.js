@@ -19,6 +19,11 @@ export default {
       return new Response('Method Not Allowed', { status: 405 });
     }
 
+    const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+    if (!env.WEBHOOK_SECRET || secret !== env.WEBHOOK_SECRET) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
     // Fix 7 (Audit): Check TELEGRAM_BOT_TOKEN environment variable
     if (!env.TELEGRAM_BOT_TOKEN) {
       console.error('FATAL: TELEGRAM_BOT_TOKEN environment variable is not set.');
@@ -35,7 +40,9 @@ export default {
       return new Response('OK', { status: 200 });
     } catch (err) {
       console.error('Error handling Telegram update:', err);
-      return new Response('Internal Error', { status: 500 });
+      // Always return 200 to Telegram to prevent infinite retries
+      // Log the error but do not surface it as a 500
+      return new Response('OK', { status: 200 });
     }
   }
 };
@@ -54,9 +61,7 @@ async function handleMessage(msg, env, ctx) {
   // Event handler: Bot added to a group (new_chat_members containing bot ID)
   if (Array.isArray(msg.new_chat_members) && env.TELEGRAM_BOT_TOKEN) {
     const botIdStr = env.TELEGRAM_BOT_TOKEN.split(':')[0];
-    const isBotAdded = msg.new_chat_members.some(
-      member => String(member.id) === botIdStr || (member.is_bot && String(member.id) === botIdStr)
-    );
+    const isBotAdded = msg.new_chat_members.some(member => String(member.id) === botIdStr);
     if (isBotAdded) {
       await sendTelegramMessage(
         env.TELEGRAM_BOT_TOKEN,
@@ -98,51 +103,56 @@ async function handleMessage(msg, env, ctx) {
     return;
   }
 
-  switch (command) {
-    case '/approvegroup':
-      await handleApproveGroup(chatId, chatType, senderId, argsStr, env);
-      break;
-    case '/revokegroup':
-      await handleRevokeGroup(chatId, chatType, senderId, argsStr, env);
-      break;
-    case '/approve':
-      await handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
-      break;
-    case '/unapprove':
-      await handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
-      break;
-    case '/admins':
-      await handleListAdmins(chatId, chatType, senderId, env);
-      break;
-    case '/reports':
-      await handleListReports(chatId, chatType, senderId, argsStr, env);
-      break;
-    case '/view':
-      await handleResolveReportDetails(chatId, argsStr, env, senderId, chatType);
-      break;
-    case '/resolve':
-      await handleResolveReport(chatId, argsStr, env, senderId, chatType);
-      break;
-    case '/dismiss':
-      await handleDismissReport(chatId, argsStr, env, senderId, chatType);
-      break;
-    case '/history':
-      await handleUserHistory(chatId, msg, argsStr, env);
-      break;
-    case '/stats':
-      await handleStats(chatId, chatType, senderId, env);
-      break;
-    case '/settings':
-      await handleSettings(chatId, chatType, senderId, argsStr, env);
-      break;
-    case '/export':
-      await handleExport(chatId, chatType, senderId, argsStr, env);
-      break;
-    case '/clearreports':
-      await handleClearReports(chatId, chatType, senderId, argsStr, env);
-      break;
-    case '/help':
-      await handleHelp(chatId, env);
-      break;
+  try {
+    switch (command) {
+      case '/approvegroup':
+        await handleApproveGroup(chatId, chatType, senderId, argsStr, env);
+        break;
+      case '/revokegroup':
+        await handleRevokeGroup(chatId, chatType, senderId, argsStr, env);
+        break;
+      case '/approve':
+        await handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
+        break;
+      case '/unapprove':
+        await handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
+        break;
+      case '/admins':
+        await handleListAdmins(chatId, chatType, senderId, env);
+        break;
+      case '/reports':
+        await handleListReports(chatId, chatType, senderId, argsStr, env);
+        break;
+      case '/view':
+        await handleResolveReportDetails(chatId, argsStr, env, senderId, chatType);
+        break;
+      case '/resolve':
+        await handleResolveReport(chatId, argsStr, env, senderId, chatType);
+        break;
+      case '/dismiss':
+        await handleDismissReport(chatId, argsStr, env, senderId, chatType);
+        break;
+      case '/history':
+        await handleUserHistory(chatId, msg, argsStr, env);
+        break;
+      case '/stats':
+        await handleStats(chatId, chatType, senderId, env);
+        break;
+      case '/settings':
+        await handleSettings(chatId, chatType, senderId, argsStr, env);
+        break;
+      case '/export':
+        await handleExport(chatId, chatType, senderId, argsStr, env);
+        break;
+      case '/clearreports':
+        await handleClearReports(chatId, chatType, senderId, argsStr, env);
+        break;
+      case '/help':
+        await handleHelp(chatId, env);
+        break;
+    }
+  } catch (err) {
+    console.error(`Command handler error [${command}]:`, err);
+    // Swallow — do not rethrow
   }
 }
