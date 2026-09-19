@@ -162,6 +162,44 @@ export async function handleReportCommand(msg, argsStr, env, ctx) {
     ON CONFLICT(group_id, user_id) DO UPDATE SET last_report_time = excluded.last_report_time
   `).bind(chatId, reporter.id, now).run();
 
+  // Threshold check
+  const settings_threshold = settings.report_threshold || 5;
+  const openCount = await env.DB.prepare(
+    'SELECT COUNT(*) as cnt FROM reports WHERE group_id = ? AND reported_id = ? AND status = "open"'
+  ).bind(chatId, targetUser.id).first();
+
+  if (openCount && openCount.cnt >= settings_threshold) {
+    // Notify admins that threshold has been reached
+    const thresholdAlertText =
+      `⚠️ <b>Report Threshold Reached</b>\n\n` +
+      `👤 <b>User:</b> ${escapeHtml(targetUserStr)}\n` +
+      `📊 <b>Open Reports:</b> ${openCount.cnt}/${settings_threshold}\n` +
+      `📌 <b>Group:</b> ${escapeHtml(groupTitle)}\n\n` +
+      `Consider taking action: review with <code>/history ${targetUser.id}</code>`;
+
+    // Route threshold alert same as report notifications
+    const thresholdSettings = await getGroupSettings(env.DB, chatId);
+    if (thresholdSettings.notification_chat_id) {
+      await sendTelegramMessage(
+        env.TELEGRAM_BOT_TOKEN,
+        thresholdSettings.notification_chat_id,
+        thresholdAlertText
+      ).catch(e => console.error('Threshold alert to notification_chat failed:', e));
+    } else {
+      const { results: tAdmins } = await env.DB.prepare(
+        'SELECT user_id FROM approved_admins WHERE group_id = ?'
+      ).bind(chatId).all();
+      if (tAdmins && tAdmins.length > 0) {
+        await Promise.allSettled(
+          tAdmins.map(a =>
+            sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, a.user_id, thresholdAlertText)
+              .catch(e => console.error(`Threshold alert DM failed for ${a.user_id}:`, e))
+          )
+        );
+      }
+    }
+  }
+
   // Send Confirmation to Reporter
   await sendTelegramMessage(
     env.TELEGRAM_BOT_TOKEN,
@@ -173,29 +211,16 @@ export async function handleReportCommand(msg, argsStr, env, ctx) {
   // Send Notification to Admins asynchronously using ctx.waitUntil
   const adminNotificationPromise = (async () => {
     try {
-      let adminIds = [];
       const { results: approvedAdmins } = await env.DB.prepare(
         'SELECT user_id FROM approved_admins WHERE group_id = ?'
       ).bind(chatId).all();
 
-      if (approvedAdmins && approvedAdmins.length > 0) {
-        adminIds = approvedAdmins.map(a => a.user_id);
-      } else {
-        const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId })
-        });
-        const data = await res.json();
-        if (data.ok && data.result) {
-          for (const admin of data.result) {
-            const user = admin.user;
-            if (user.is_bot || admin.is_anonymous) continue;
-            adminIds.push(user.id);
-          }
-        }
+      if (!approvedAdmins || approvedAdmins.length === 0) {
+        // No approved admins configured — skip notification
+        return;
       }
+
+      const adminIds = approvedAdmins.map(a => a.user_id);
 
       const reporterLink = reporter.username
         ? `@${reporter.username}`
@@ -231,13 +256,13 @@ export async function handleReportCommand(msg, argsStr, env, ctx) {
           console.error(`Failed to send alert to notification_chat_id ${settings.notification_chat_id}:`, err);
         }
       } else {
-        for (const adminId of adminIds) {
-          try {
-            await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, adminAlertText);
-          } catch (err) {
-            console.error(`Failed to send DM to admin ${adminId}:`, err);
-          }
-        }
+        await Promise.allSettled(
+          adminIds.map(adminId =>
+            sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, adminAlertText).catch(e =>
+              console.error(`Failed DM to admin ${adminId}:`, e)
+            )
+          )
+        );
       }
     } catch (err) {
       console.error('Failed to process admin notifications:', err);
