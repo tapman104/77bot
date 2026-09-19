@@ -1,7 +1,12 @@
-import { sendTelegramMessage } from '../lib/telegram.js';
+import { sendTelegramMessage, checkIsAdmin } from '../lib/telegram.js';
 import { getGroupSettings } from '../lib/settings.js';
 
-export async function handleSettings(chatId, argsStr, env) {
+export async function handleSettings(chatId, chatType, senderId, argsStr, env) {
+  const isAdmin = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, senderId, chatType, env, chatId);
+  if (!isAdmin) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to administrators.');
+    return;
+  }
   const current = await getGroupSettings(env.DB, chatId);
 
   if (!argsStr) {

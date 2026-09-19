@@ -1,12 +1,11 @@
-import { sendTelegramMessage, escapeHtml } from '../lib/telegram.js';
-import { isOwner } from '../lib/owner.js';
+import { sendTelegramMessage, escapeHtml, checkIsAdmin } from '../lib/telegram.js';
 
 export async function handleUserHistory(chatId, msg, argsStr, env) {
   const chatType = msg.chat.type;
 
-  if (chatType === 'private' && !isOwner(msg.from.id, env)) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat or by the bot owner.');
-    return;
+  if (chatType !== 'private') {
+    const isAdmin = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, msg.from.id, chatType, env);
+    if (!isAdmin) return;
   }
 
   let targetQuery = argsStr.trim();
@@ -35,9 +34,9 @@ export async function handleUserHistory(chatId, msg, argsStr, env) {
     } else {
       ({ results } = await env.DB.prepare(`
         SELECT id, reason, status, created_at, group_name FROM reports
-        WHERE reported_username LIKE ?
+        WHERE reported_username = ?
         ORDER BY id DESC LIMIT 20
-      `).bind(`%${cleanTarget}%`).all());
+      `).bind(`@${cleanTarget}`).all());
     }
   } else {
     if (isNumeric) {
@@ -49,9 +48,9 @@ export async function handleUserHistory(chatId, msg, argsStr, env) {
     } else {
       ({ results } = await env.DB.prepare(`
         SELECT id, reason, status, created_at FROM reports
-        WHERE group_id = ? AND reported_username LIKE ?
+        WHERE group_id = ? AND reported_username = ?
         ORDER BY id DESC LIMIT 10
-      `).bind(chatId, `%${cleanTarget}%`).all());
+      `).bind(chatId, `@${cleanTarget}`).all());
     }
   }
 

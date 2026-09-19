@@ -1,6 +1,11 @@
-import { sendTelegramMessage, escapeHtml } from '../lib/telegram.js';
+import { sendTelegramMessage, escapeHtml, checkIsAdmin } from '../lib/telegram.js';
 
-export async function handleStats(chatId, env) {
+export async function handleStats(chatId, chatType, senderId, env) {
+  const isAdmin = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, senderId, chatType, env, chatId);
+  if (!isAdmin) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to administrators.');
+    return;
+  }
   const totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ?').bind(chatId).first();
   const openRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "open"').bind(chatId).first();
   const resolvedRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "resolved"').bind(chatId).first();

@@ -1,5 +1,5 @@
 import { handleChatMemberUpdate } from './handlers/chatMember.js';
-import { sendTelegramMessage, checkIsAdmin } from './lib/telegram.js';
+import { sendTelegramMessage } from './lib/telegram.js';
 import { handleApproveGroup, handleRevokeGroup } from './commands/group.js';
 import { handleApproveAdmin, handleUnapproveAdmin, handleListAdmins } from './commands/approve.js';
 import { handleListReports } from './commands/reports.js';
@@ -98,16 +98,6 @@ async function handleMessage(msg, env, ctx) {
     return;
   }
 
-  // All other commands require admin status
-  const isAdminUser = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, senderId, chatType, env);
-  if (!isAdminUser) {
-    // Silently ignore or inform user
-    if (chatType === 'private') {
-      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to administrators.');
-    }
-    return;
-  }
-
   switch (command) {
     case '/approvegroup':
       await handleApproveGroup(chatId, chatType, senderId, argsStr, env);
@@ -122,34 +112,34 @@ async function handleMessage(msg, env, ctx) {
       await handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
       break;
     case '/admins':
-      await handleListAdmins(chatId, chatType, env);
+      await handleListAdmins(chatId, chatType, senderId, env);
       break;
     case '/reports':
-      await handleListReports(chatId, env);
+      await handleListReports(chatId, chatType, senderId, argsStr, env);
       break;
     case '/view':
-      await handleResolveReportDetails(chatId, argsStr, env);
+      await handleResolveReportDetails(chatId, argsStr, env, senderId, chatType);
       break;
     case '/resolve':
-      await handleResolveReport(chatId, argsStr, env);
+      await handleResolveReport(chatId, argsStr, env, senderId, chatType);
       break;
     case '/dismiss':
-      await handleDismissReport(chatId, argsStr, env);
+      await handleDismissReport(chatId, argsStr, env, senderId, chatType);
       break;
     case '/history':
       await handleUserHistory(chatId, msg, argsStr, env);
       break;
     case '/stats':
-      await handleStats(chatId, env);
+      await handleStats(chatId, chatType, senderId, env);
       break;
     case '/settings':
-      await handleSettings(chatId, argsStr, env);
+      await handleSettings(chatId, chatType, senderId, argsStr, env);
       break;
     case '/export':
-      await handleExport(chatId, argsStr, env);
+      await handleExport(chatId, chatType, senderId, argsStr, env);
       break;
     case '/clearreports':
-      await handleClearReports(chatId, argsStr, env);
+      await handleClearReports(chatId, chatType, senderId, argsStr, env);
       break;
     case '/help':
       await handleHelp(chatId, env);

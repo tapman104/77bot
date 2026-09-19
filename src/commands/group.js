@@ -12,8 +12,8 @@ export async function handleApproveGroup(chatId, chatType, senderId, argsStr, en
     return;
   }
 
-  const groupId = parseInt(argsStr.trim(), 10);
-  if (isNaN(groupId)) {
+  const groupId = Number(argsStr.trim());
+  if (!Number.isSafeInteger(groupId)) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/approvegroup &lt;group_id&gt;</code>');
     return;
   }
@@ -37,17 +37,19 @@ export async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env
     return;
   }
 
-  const groupId = parseInt(argsStr.trim(), 10);
-  if (isNaN(groupId)) {
+  const groupId = Number(argsStr.trim());
+  if (!Number.isSafeInteger(groupId)) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/revokegroup &lt;group_id&gt;</code>');
     return;
   }
 
-  await env.DB.prepare('DELETE FROM approved_groups WHERE group_id = ?').bind(groupId).run();
-  await env.DB.prepare('DELETE FROM reports WHERE group_id = ?').bind(groupId).run();
-  await env.DB.prepare('DELETE FROM group_settings WHERE group_id = ?').bind(groupId).run();
-  await env.DB.prepare('DELETE FROM user_cooldowns WHERE group_id = ?').bind(groupId).run();
-  await env.DB.prepare('DELETE FROM approved_admins WHERE group_id = ?').bind(groupId).run();
+  const stmt1 = env.DB.prepare('DELETE FROM approved_groups WHERE group_id = ?').bind(groupId);
+  const stmt2 = env.DB.prepare('DELETE FROM reports WHERE group_id = ?').bind(groupId);
+  const stmt3 = env.DB.prepare('DELETE FROM group_settings WHERE group_id = ?').bind(groupId);
+  const stmt4 = env.DB.prepare('DELETE FROM user_cooldowns WHERE group_id = ?').bind(groupId);
+  const stmt5 = env.DB.prepare('DELETE FROM approved_admins WHERE group_id = ?').bind(groupId);
+
+  await env.DB.batch([stmt1, stmt2, stmt3, stmt4, stmt5]);
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `🗑️ Group <code>${groupId}</code> revoked and all data purged.`);
 }

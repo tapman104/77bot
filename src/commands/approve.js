@@ -1,6 +1,12 @@
-import { sendTelegramMessage, escapeHtml } from '../lib/telegram.js';
+import { sendTelegramMessage, escapeHtml, checkIsAdmin } from '../lib/telegram.js';
 
 export async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env) {
+  const isAdmin = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, senderId, chatType, env, chatId);
+  if (!isAdmin) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to administrators.');
+    return;
+  }
+
   if (chatType === 'private') {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat.');
     return;
@@ -17,29 +23,6 @@ export async function handleApproveAdmin(chatId, chatType, senderId, msg, argsSt
 
   if (!targetUserId || isNaN(targetUserId)) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/approve user_id</code> or reply to a user.');
-    return;
-  }
-
-  // 1. Verify target is a Telegram admin of this group via getChatMember
-  let isTgAdmin = false;
-  try {
-    const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatMember`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, user_id: targetUserId })
-    });
-    const data = await res.json();
-    if (data.ok && data.result) {
-      const status = data.result.status;
-      isTgAdmin = status === 'administrator' || status === 'creator';
-    }
-  } catch (err) {
-    console.error('getChatMember failed in handleApproveAdmin:', err);
-  }
-
-  if (!isTgAdmin) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `⚠️ User ${targetUserId} is not a Telegram admin of this group.`);
     return;
   }
 
@@ -63,11 +46,17 @@ export async function handleApproveAdmin(chatId, chatType, senderId, msg, argsSt
   await sendTelegramMessage(
     env.TELEGRAM_BOT_TOKEN,
     chatId,
-    `✅ Admin ${targetUserId} approved by ${escapeHtml(approverUsername)}.`
+    `✅ User ${targetUserId} approved as bot moderator by ${escapeHtml(approverUsername)}.`
   );
 }
 
 export async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env) {
+  const isAdmin = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, senderId, chatType, env, chatId);
+  if (!isAdmin) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to administrators.');
+    return;
+  }
+
   if (chatType === 'private') {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat.');
     return;
@@ -91,10 +80,38 @@ export async function handleUnapproveAdmin(chatId, chatType, senderId, msg, args
     'DELETE FROM approved_admins WHERE group_id = ? AND user_id = ?'
   ).bind(chatId, targetUserId).run();
 
-  await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `🗑️ Admin approval for ${targetUserId} revoked.`);
+  let isStillTgAdmin = false;
+  try {
+    const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatMember`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, user_id: targetUserId })
+    });
+    const data = await res.json();
+    if (data.ok && data.result) {
+      const status = data.result.status;
+      isStillTgAdmin = status === 'administrator' || status === 'creator';
+    }
+  } catch (err) {
+    console.error('getChatMember failed in handleUnapproveAdmin:', err);
+  }
+
+  let text = `🗑️ Admin approval for ${targetUserId} revoked.`;
+  if (isStillTgAdmin) {
+    text += `\n⚠️ Note: This user is still a Telegram admin of this group and retains access through Telegram admin status.`;
+  }
+
+  await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, text);
 }
 
-export async function handleListAdmins(chatId, chatType, env) {
+export async function handleListAdmins(chatId, chatType, senderId, env) {
+  const isAdmin = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, senderId, chatType, env, chatId);
+  if (!isAdmin) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to administrators.');
+    return;
+  }
+
   if (chatType === 'private') {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat.');
     return;

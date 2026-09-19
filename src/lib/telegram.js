@@ -27,20 +27,15 @@ export async function sendTelegramMessage(botToken, chatId, text, replyToMessage
  * Helper: Verify Admin Status (Telegram admin check + D1 approved_admins check)
  */
 export async function checkIsAdmin(botToken, chatId, userId, chatType, env, targetGroupId = null) {
-  // Owner (in GLOBAL_ADMIN_IDS) always bypasses admin checks
+  // 1. Owner bypass
   if (isOwner(userId, env)) {
     return true;
   }
 
-  if (chatType === 'private' && targetGroupId === null) {
-    // Non-owner in private chat is denied without a target group
-    return false;
-  }
+  const groupToCheck = targetGroupId ?? chatId;
 
-  const groupToCheck = targetGroupId || chatId;
-
+  // 2. Query approved_admins
   try {
-    // Check D1 approved_admins FIRST
     const approvedAdmin = await env.DB.prepare(
       'SELECT user_id FROM approved_admins WHERE group_id = ? AND user_id = ?'
     ).bind(groupToCheck, userId).first();
@@ -48,8 +43,17 @@ export async function checkIsAdmin(botToken, chatId, userId, chatType, env, targ
     if (approvedAdmin) {
       return true;
     }
+  } catch (err) {
+    console.error('Admin DB check failed:', err);
+  }
 
-    // Step 1: Telegram admin status check via getChatMember API
+  // 3. If targetGroupId is null and chatType is private -> return false
+  if (chatType === 'private' && targetGroupId === null) {
+    return false;
+  }
+
+  // 4, 5, 6. getChatMember check against targetGroupId (groupToCheck)
+  try {
     const url = `https://api.telegram.org/bot${botToken}/getChatMember`;
     const res = await fetch(url, {
       method: 'POST',
@@ -60,11 +64,7 @@ export async function checkIsAdmin(botToken, chatId, userId, chatType, env, targ
     if (!data.ok || !data.result) return false;
 
     const status = data.result.status;
-    const isTgAdmin = status === 'administrator' || status === 'creator';
-    if (!isTgAdmin) return false;
-
-    // Step 2: Treat any Telegram admin as approved (Fix 5)
-    return true;
+    return status === 'administrator' || status === 'creator';
   } catch (err) {
     console.error('Admin check failed:', err);
     return false;
