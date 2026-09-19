@@ -211,17 +211,6 @@ export async function handleReportCommand(msg, argsStr, env, ctx) {
   // Send Notification to Admins asynchronously using ctx.waitUntil
   const adminNotificationPromise = (async () => {
     try {
-      const { results: approvedAdmins } = await env.DB.prepare(
-        'SELECT user_id FROM approved_admins WHERE group_id = ?'
-      ).bind(chatId).all();
-
-      if (!approvedAdmins || approvedAdmins.length === 0) {
-        // No approved admins configured — skip notification
-        return;
-      }
-
-      const adminIds = approvedAdmins.map(a => a.user_id);
-
       const reporterLink = reporter.username
         ? `@${reporter.username}`
         : `<a href="tg://user?id=${reporter.id}">${escapeHtml(reporter.first_name || 'User')}</a>`;
@@ -249,20 +238,27 @@ export async function handleReportCommand(msg, argsStr, env, ctx) {
         messageLinkLine +
         `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
 
-      if (settings.notification_chat_id) {
-        try {
-          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, settings.notification_chat_id, adminAlertText);
-        } catch (err) {
-          console.error(`Failed to send alert to notification_chat_id ${settings.notification_chat_id}:`, err);
-        }
+      const notifSettings = await getGroupSettings(env.DB, chatId);
+
+      if (notifSettings.notification_chat_id) {
+        await sendTelegramMessage(
+          env.TELEGRAM_BOT_TOKEN,
+          notifSettings.notification_chat_id,
+          adminAlertText
+        ).catch(e => console.error('Report alert to notification_chat failed:', e));
       } else {
-        await Promise.allSettled(
-          adminIds.map(adminId =>
-            sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, adminAlertText).catch(e =>
-              console.error(`Failed DM to admin ${adminId}:`, e)
+        const { results: approvedAdmins } = await env.DB.prepare(
+          'SELECT user_id FROM approved_admins WHERE group_id = ?'
+        ).bind(chatId).all();
+
+        if (approvedAdmins && approvedAdmins.length > 0) {
+          await Promise.allSettled(
+            approvedAdmins.map(adminId =>
+              sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId.user_id, adminAlertText)
+                .catch(e => console.error(`Failed DM to admin ${adminId.user_id}:`, e))
             )
-          )
-        );
+          );
+        }
       }
     } catch (err) {
       console.error('Failed to process admin notifications:', err);
