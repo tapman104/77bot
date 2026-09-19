@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS reports (
     reported_username TEXT,
     reason TEXT NOT NULL,
     message_id INTEGER,
+    message_text TEXT,
     status TEXT NOT NULL DEFAULT 'open', -- 'open', 'resolved', 'dismissed'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

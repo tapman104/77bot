@@ -28,18 +28,13 @@ export default {
       return new Response('Internal configuration error', { status: 500 });
     }
 
-    // Optional: Secret Token Verification
-    if (env.TELEGRAM_SECRET_TOKEN) {
-      const token = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-      if (token !== env.TELEGRAM_SECRET_TOKEN) {
-        return new Response('Unauthorized', { status: 401 });
-      }
-    }
 
     try {
       const update = await request.json();
       if (update.message) {
         await handleMessage(update.message, env, ctx);
+      } else if (update.chat_member) {
+        ctx.waitUntil(handleChatMemberUpdate(update.chat_member, env));
       }
       return new Response('OK', { status: 200 });
     } catch (err) {
@@ -172,6 +167,84 @@ async function handleMessage(msg, env, ctx) {
     case '/help':
       await handleHelp(chatId, env);
       break;
+  }
+}
+
+async function handleChatMemberUpdate(update, env) {
+  const chatId = update.chat.id;
+  const groupTitle = update.chat.title || String(chatId);
+  const actor = update.from;
+  const target = update.new_chat_member.user;
+  const oldStatus = update.old_chat_member.status;
+  const newStatus = update.new_chat_member.status;
+
+  const botIdStr = env.TELEGRAM_BOT_TOKEN.split(':')[0];
+  if (String(target.id) === botIdStr) return;
+
+  const approvedGroup = await env.DB.prepare(
+    'SELECT group_id FROM approved_groups WHERE group_id = ?'
+  ).bind(chatId).first();
+  if (!approvedGroup) return;
+
+  const isKick   = newStatus === 'kicked' && oldStatus !== 'kicked';
+  const isMute   = newStatus === 'restricted' && oldStatus !== 'restricted';
+  const isUnmute = oldStatus === 'restricted' && (newStatus === 'member' || newStatus === 'administrator');
+  const isUnban  = oldStatus === 'kicked'     && (newStatus === 'member' || newStatus === 'left');
+
+  let emoji, action;
+  if      (isKick)   { emoji = '🔨'; action = 'Banned/Kicked'; }
+  else if (isMute)   { emoji = '🔇'; action = 'Muted/Restricted'; }
+  else if (isUnmute) { emoji = '🔊'; action = 'Unmuted'; }
+  else if (isUnban)  { emoji = '✅'; action = 'Unbanned'; }
+  else return;
+
+  const actorLink = actor.username
+    ? `@${actor.username}`
+    : `<a href="tg://user?id=${actor.id}">${escapeHtml(actor.first_name || 'Admin')}</a>`;
+  const targetLink = target.username
+    ? `@${target.username}`
+    : `<a href="tg://user?id=${target.id}">${escapeHtml(target.first_name || 'User')}</a>`;
+
+  let durationLine = '';
+  if (isMute && update.new_chat_member.until_date) {
+    const until = new Date(update.new_chat_member.until_date * 1000).toUTCString();
+    durationLine = `\n⏰ <b>Until:</b> ${until}`;
+  }
+
+  const alertText =
+    `${emoji} <b>Admin Action: ${action}</b>\n\n` +
+    `👮 <b>By:</b> ${actorLink}\n` +
+    `👤 <b>Target:</b> ${targetLink}` +
+    durationLine +
+    `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
+
+  let adminIds = [];
+  const { results: approvedAdmins } = await env.DB.prepare(
+    'SELECT user_id FROM approved_admins WHERE group_id = ?'
+  ).bind(chatId).all();
+
+  if (approvedAdmins && approvedAdmins.length > 0) {
+    adminIds = approvedAdmins.map(a => a.user_id);
+  } else {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId })
+    });
+    const data = await res.json();
+    if (data.ok && data.result) {
+      for (const a of data.result) {
+        if (!a.user.is_bot && !a.is_anonymous) adminIds.push(a.user.id);
+      }
+    }
+  }
+
+  for (const adminId of adminIds) {
+    try {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, alertText);
+    } catch (e) {
+      console.error(`Failed DM to admin ${adminId}:`, e);
+    }
   }
 }
 
@@ -469,11 +542,13 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   let targetUser = null;
   let targetMessageId = null;
   let reason = argsStr;
+  let reportedMessageText = null;
 
   // Case 1: Reporting via Reply
   if (replyTo) {
     targetUser = replyTo.from;
     targetMessageId = replyTo.message_id;
+    reportedMessageText = replyTo.text || replyTo.caption || '[Media/Non-text]';
   } else {
     // Case 2: Reporting via @username mention in args
     const parts = argsStr.split(' ');
@@ -646,6 +721,10 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
         }
       }
 
+      const reporterLink = reporter.username
+        ? `@${reporter.username}`
+        : `<a href="tg://user?id=${reporter.id}">${escapeHtml(reporter.first_name || 'User')}</a>`;
+
       const reportedLink = targetUser.username 
         ? `@${targetUser.username}` 
         : `<a href="tg://user?id=${targetUser.id}">${escapeHtml(targetUser.first_name || 'User ' + targetUser.id)}</a>`;
@@ -659,8 +738,10 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
 
       const adminAlertText = 
         `🚨 <b>New Report</b>\n\n` +
+        `🕵️ <b>Reporter:</b> ${reporterLink}\n` +
         `👤 <b>Reported:</b> ${reportedLink}\n` +
         `📝 <b>Reason:</b> ${escapeHtml(reason)}\n` +
+        `💬 <b>Message:</b> <i>${escapeHtml(reportedMessageText || 'N/A')}</i>\n` +
         `🆔 <b>Report ID:</b> #${reportId}` +
         messageLinkLine +
         `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
