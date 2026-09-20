@@ -39,7 +39,7 @@ export default {
       } else if (update.chat_member) {
         ctx.waitUntil(handleChatMemberUpdate(update.chat_member, env));
       } else if (update.callback_query) {
-        await handleCallbackQuery(update.callback_query, env, ctx);
+        await handleCallbackQuery(update.callback_query, env);
       }
       return new Response('OK', { status: 200 });
     } catch (err) {
@@ -69,9 +69,13 @@ async function isElevated(userId, env, groupId = null) {
   try {
     let row;
     if (groupId !== null) {
-      row = await env.DB.prepare('SELECT user_id FROM approved_admins WHERE user_id = ? AND (group_id = ? OR group_id = 0)').bind(userId, groupId).first();
+      row = await env.DB.prepare(
+        'SELECT user_id FROM approved_admins WHERE group_id = ? AND user_id = ?'
+      ).bind(groupId, userId).first();
     } else {
-      row = await env.DB.prepare('SELECT user_id FROM approved_admins WHERE user_id = ? LIMIT 1').bind(userId).first();
+      row = await env.DB.prepare(
+        'SELECT user_id FROM approved_admins WHERE user_id = ? LIMIT 1'
+      ).bind(userId).first();
     }
     return !!row;
   } catch (e) {
@@ -104,27 +108,6 @@ async function handleMessage(msg, env, ctx) {
         `⏳ This bot requires owner approval before it can be used in this group. Group ID: <code>${chatId}</code> — forward this to the bot owner.`
       );
       return;
-    }
-    for (const member of msg.new_chat_members) {
-      if (String(member.id) !== botIdStr && !member.is_bot) {
-        const memberName = member.username ? `@${member.username}` : (member.first_name || `User ${member.id}`);
-        const logMsg = `👤 ${memberName} (<code>${member.id}</code>)`;
-        if (ctx && typeof ctx.waitUntil === 'function') {
-          ctx.waitUntil(sendLogEvent(env, chatId, '👋 <b>User Joined</b>', logMsg));
-        }
-      }
-    }
-  }
-
-  if (msg.left_chat_member) {
-    const member = msg.left_chat_member;
-    const botIdStr = env.TELEGRAM_BOT_TOKEN ? env.TELEGRAM_BOT_TOKEN.split(':')[0] : null;
-    if (botIdStr && String(member.id) !== botIdStr) {
-      const memberName = member.username ? `@${member.username}` : (member.first_name || `User ${member.id}`);
-      const logMsg = `👤 ${memberName} (<code>${member.id}</code>)`;
-      if (ctx && typeof ctx.waitUntil === 'function') {
-        ctx.waitUntil(sendLogEvent(env, chatId, '🚪 <b>User Left/Removed</b>', logMsg));
-      }
     }
   }
 
@@ -174,19 +157,16 @@ async function handleMessage(msg, env, ctx) {
 
   switch (command) {
     case '/approvegroup':
-      await handleApproveGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser, ctx);
+      await handleApproveGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser);
       break;
     case '/revokegroup':
-      await handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser, ctx);
+      await handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser);
       break;
     case '/approve':
-      await handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env, ctx);
+      await handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
       break;
     case '/unapprove':
-      await handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env, ctx);
-      break;
-    case '/delete':
-      await handleDeleteCommand(chatId, msg, env, ctx);
+      await handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
       break;
     case '/admins':
       await handleListAdmins(chatId, chatType, env);
@@ -195,13 +175,13 @@ async function handleMessage(msg, env, ctx) {
       await handleListReports(chatId, chatType, env);
       break;
     case '/view':
-      await handleResolveReportDetails(chatId, chatType, argsStr, env);
+      await handleResolveReportDetails(chatId, argsStr, env);
       break;
     case '/resolve':
-      await handleResolveReport(chatId, argsStr, env, ctx, msg);
+      await handleResolveReport(chatId, argsStr, env);
       break;
     case '/dismiss':
-      await handleDismissReport(chatId, argsStr, env, ctx, msg);
+      await handleDismissReport(chatId, argsStr, env);
       break;
     case '/history':
       await handleUserHistory(chatId, msg, argsStr, env);
@@ -224,7 +204,7 @@ async function handleMessage(msg, env, ctx) {
   }
 }
 
-async function handleCallbackQuery(callbackQuery, env, ctx) {
+async function handleCallbackQuery(callbackQuery, env) {
   const data = callbackQuery.data;
   const chatId = callbackQuery.message.chat.id;
   const callbackQueryId = callbackQuery.id;
@@ -310,14 +290,33 @@ async function handleChatMemberUpdate(update, env) {
     durationLine +
     `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
 
-  try {
-    const settings = await getGroupSettings(env.DB, chatId);
-    const notifyDest = settings.notification_chat_id
-      || (env.DEFAULT_ADMIN_CHAT_ID ? parseInt(env.DEFAULT_ADMIN_CHAT_ID, 10) : null)
-      || chatId;
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, notifyDest, alertText);
-  } catch (e) {
-    console.error('handleChatMemberUpdate log failed:', e);
+  let adminIds = [];
+  const { results: approvedAdmins } = await env.DB.prepare(
+    'SELECT user_id FROM approved_admins WHERE group_id = ?'
+  ).bind(chatId).all();
+
+  if (approvedAdmins && approvedAdmins.length > 0) {
+    adminIds = approvedAdmins.map(a => a.user_id);
+  } else {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId })
+    });
+    const data = await res.json();
+    if (data.ok && data.result) {
+      for (const a of data.result) {
+        if (!a.user.is_bot && !a.is_anonymous) adminIds.push(a.user.id);
+      }
+    }
+  }
+
+  for (const adminId of adminIds) {
+    try {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, alertText);
+    } catch (e) {
+      console.error(`Failed DM to admin ${adminId}:`, e);
+    }
   }
 }
 
@@ -411,22 +410,6 @@ function escapeHtml(str) {
 }
 
 /**
- * Helper: Send Log Event
- */
-async function sendLogEvent(env, groupId, title, details) {
-  try {
-    const settings = await getGroupSettings(env.DB, groupId);
-    const notifyDest = settings.notification_chat_id
-      || (env.DEFAULT_ADMIN_CHAT_ID ? parseInt(env.DEFAULT_ADMIN_CHAT_ID, 10) : null)
-      || groupId;
-    const text = `${title}\n\n${details}\n📌 <b>Group:</b> ${groupId}`;
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, notifyDest, text);
-  } catch (e) {
-    console.error('sendLogEvent failed:', e);
-  }
-}
-
-/**
  * Helper: Get Group Settings
  */
 async function getGroupSettings(db, groupId) {
@@ -447,7 +430,7 @@ async function getGroupSettings(db, groupId) {
 /**
  * COMMAND: /approvegroup <group_id> (Owner, Private Chat Only)
  */
-async function handleApproveGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false, ctx) {
+async function handleApproveGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false) {
   if (!isElevatedUser) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner or approved admins.');
     return;
@@ -465,15 +448,12 @@ async function handleApproveGroup(chatId, chatType, senderId, argsStr, env, isEl
   `).bind(groupId, senderId).run();
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ Group <code>${groupId}</code> is now approved.`);
-  if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil(sendLogEvent(env, env.DEFAULT_ADMIN_CHAT_ID || chatId, '✅ <b>Group Approved</b>', `Group <code>${groupId}</code> was approved.`));
-  }
 }
 
 /**
  * COMMAND: /revokegroup <group_id> (Owner, Private Chat Only)
  */
-async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false, ctx) {
+async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false) {
   if (!isElevatedUser) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner or approved admins.');
     return;
@@ -492,15 +472,12 @@ async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isEle
   await env.DB.prepare('DELETE FROM approved_admins WHERE group_id = ?').bind(groupId).run();
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `🗑️ Group <code>${groupId}</code> revoked and all data purged.`);
-  if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil(sendLogEvent(env, env.DEFAULT_ADMIN_CHAT_ID || chatId, '🗑️ <b>Group Revoked</b>', `Group <code>${groupId}</code> was revoked.`));
-  }
 }
 
 /**
  * COMMAND: /approve <user_id> (Approved Admins, Group Chat Only)
  */
-async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env, ctx) {
+async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env) {
   let targetUserId = null;
   const cleanArgs = argsStr.trim();
 
@@ -560,8 +537,7 @@ async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env,
   // 3. Insert into approved_admins
   if (chatType === 'private') {
     await env.DB.prepare(`
-      INSERT INTO approved_admins (group_id, user_id, approved_by) VALUES (0, ?, ?)
-      ON CONFLICT(group_id, user_id) DO UPDATE SET approved_by = excluded.approved_by, approved_at = CURRENT_TIMESTAMP
+      INSERT INTO approved_admins (user_id, approved_by) VALUES (?, ?)
     `).bind(targetUserId, senderId).run();
   } else {
     await env.DB.prepare(`
@@ -576,15 +552,12 @@ async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env,
     chatId,
     `✅ Admin ${targetUserId} approved by ${escapeHtml(approverUsername)}.`
   );
-  if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil(sendLogEvent(env, chatId, '✅ <b>Admin Approved</b>', `👮 Approver: ${escapeHtml(approverUsername)} (<code>${senderId}</code>)\n👤 Target: <code>${targetUserId}</code>`));
-  }
 }
 
 /**
  * COMMAND: /unapprove <user_id> (Approved Admins, Group Chat Only)
  */
-async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env, ctx) {
+async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env) {
   let targetUserId = null;
   const cleanArgs = argsStr.trim();
 
@@ -610,10 +583,6 @@ async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, en
   }
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `🗑️ Admin approval for ${targetUserId} revoked.`);
-  const revokerUsername = msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || `User ${senderId}`);
-  if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil(sendLogEvent(env, chatId, '🗑️ <b>Admin Revoked</b>', `👮 Revoker: ${escapeHtml(revokerUsername)} (<code>${senderId}</code>)\n👤 Target: <code>${targetUserId}</code>`));
-  }
 }
 
 /**
@@ -656,7 +625,7 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   if (/^\d+$/.test(argsStr)) {
     const isAdmin = await checkIsAdmin(env.TELEGRAM_BOT_TOKEN, chatId, msg.from.id, msg.chat.type, env);
     if (!isAdmin) return;
-    await handleResolveReportDetails(chatId, msg.chat.type, argsStr, env);
+    await handleResolveReportDetails(chatId, argsStr, env);
     return;
   }
 
@@ -822,10 +791,33 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   // Send Notification to configured channel/group (or fallback) asynchronously
   const adminNotificationPromise = (async () => {
     try {
+      // Resolve notification destination:
+      // 1. group_settings.notification_chat_id (per-group override)
+      // 2. env.DEFAULT_ADMIN_CHAT_ID (global fallback from wrangler.toml [vars])
+      // 3. The group itself (last-resort fallback)
       const settings = await getGroupSettings(env.DB, chatId);
       const notifyDest = settings.notification_chat_id
         || (env.DEFAULT_ADMIN_CHAT_ID ? parseInt(env.DEFAULT_ADMIN_CHAT_ID, 10) : null)
         || chatId;
+
+      if (approvedAdmins && approvedAdmins.length > 0) {
+        adminIds = approvedAdmins.map(a => a.user_id);
+      } else {
+        const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId })
+        });
+        const data = await res.json();
+        if (data.ok && data.result) {
+          for (const admin of data.result) {
+            const user = admin.user;
+            if (user.is_bot || admin.is_anonymous) continue;
+            adminIds.push(user.id);
+          }
+        }
+      }
 
       const reporterLink = reporter.username
         ? `@${reporter.username}`
@@ -918,7 +910,7 @@ async function handleListReports(chatId, chatType, env) {
     return;
   }
 
-  let text = `📋 <b>Open Reports (${totalRow ? totalRow.count : 0}):</b>\n\n`;
+  let text = `📋 <b>Open Reports</b> (${totalRow ? totalRow.count : 0}):\n\n`;
   for (const r of results) {
     text += `• <b>#${r.id}</b> | User: ${escapeHtml(r.reported_username)} | Reason: <i>${escapeHtml(r.reason)}</i>\n`;
   }
@@ -930,7 +922,7 @@ async function handleListReports(chatId, chatType, env) {
 /**
  * COMMAND: /view <Report ID> or /report <Report ID>
  */
-async function handleResolveReportDetails(chatId, chatType, reportIdStr, env) {
+async function handleResolveReportDetails(chatId, reportIdStr, env) {
   const reportId = parseInt(reportIdStr, 10);
   if (isNaN(reportId)) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Invalid Report ID. Usage: <code>/view &lt;Report ID&gt;</code> or <code>/report &lt;Report ID&gt;</code>');
@@ -938,7 +930,7 @@ async function handleResolveReportDetails(chatId, chatType, reportIdStr, env) {
   }
 
   // Fix 3 (Audit): Scope lookup by group_id
-  const report = chatType === 'private' ? await env.DB.prepare('SELECT * FROM reports WHERE id = ?').bind(reportId).first() : await env.DB.prepare('SELECT * FROM reports WHERE id = ? AND group_id = ?').bind(reportId, chatId).first();
+  const report = await env.DB.prepare('SELECT * FROM reports WHERE id = ? AND group_id = ?').bind(reportId, chatId).first();
   if (!report) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '❌ Report not found.');
     return;
@@ -961,7 +953,7 @@ async function handleResolveReportDetails(chatId, chatType, reportIdStr, env) {
 /**
  * COMMAND: /resolve <Report ID>
  */
-async function handleResolveReport(chatId, reportIdStr, env, ctx, msg) {
+async function handleResolveReport(chatId, reportIdStr, env) {
   if (!reportIdStr) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/resolve &lt;Report ID&gt;</code>');
     return;
@@ -979,10 +971,6 @@ async function handleResolveReport(chatId, reportIdStr, env, ctx, msg) {
 
   if (result.meta.changes > 0) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ Report <b>#${reportId}</b> marked as resolved.`);
-    if (ctx && typeof ctx.waitUntil === 'function' && msg) {
-      const actorName = msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || `User ${msg.from.id}`);
-      ctx.waitUntil(sendLogEvent(env, chatId, '✅ <b>Report Resolved</b>', `👮 By: ${actorName} (<code>${msg.from.id}</code>)\n🆔 Report ID: #${reportId}`));
-    }
   } else {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `❌ Report #${reportId} not found in this group.`);
   }
@@ -991,7 +979,7 @@ async function handleResolveReport(chatId, reportIdStr, env, ctx, msg) {
 /**
  * COMMAND: /dismiss <Report ID>
  */
-async function handleDismissReport(chatId, reportIdStr, env, ctx, msg) {
+async function handleDismissReport(chatId, reportIdStr, env) {
   const reportId = parseInt(reportIdStr, 10);
   if (isNaN(reportId)) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/dismiss &lt;Report ID&gt;</code>');
@@ -1004,10 +992,6 @@ async function handleDismissReport(chatId, reportIdStr, env, ctx, msg) {
 
   if (result.meta.changes > 0) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `🗑️ Report <b>#${reportId}</b> dismissed.`);
-    if (ctx && typeof ctx.waitUntil === 'function' && msg) {
-      const actorName = msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || `User ${msg.from.id}`);
-      ctx.waitUntil(sendLogEvent(env, chatId, '🗑️ <b>Report Dismissed</b>', `👮 By: ${actorName} (<code>${msg.from.id}</code>)\n🆔 Report ID: #${reportId}`));
-    }
   } else {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `❌ Report #${reportId} not found in this group.`);
   }
@@ -1019,7 +1003,7 @@ async function handleDismissReport(chatId, reportIdStr, env, ctx, msg) {
 async function handleUserHistory(chatId, msg, argsStr, env) {
   const chatType = msg.chat.type;
 
-  if (chatType === 'private' && !(await isElevated(msg.from.id, env, null))) {
+  if (chatType === 'private' && !isOwner(msg.from.id, env)) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat or by the bot owner.');
     return;
   }
@@ -1276,43 +1260,4 @@ async function handleHelp(chatId, env) {
     `<code>/settings notification_chat -100xxxxxxxxxx</code>`;
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, text);
-}
-/**
- * COMMAND: /delete
- */
-async function handleDeleteCommand(chatId, msg, env, ctx) {
-  if (!msg.reply_to_message) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Usage: <code>/delete</code> as a reply to a message.');
-    return;
-  }
-  const targetMsg = msg.reply_to_message;
-  
-  try {
-    const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`;
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: targetMsg.message_id })
-    });
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: msg.message_id })
-    });
-  } catch (err) {
-    console.error('Delete message failed:', err);
-  }
-  
-  const actorName = msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || `User ${msg.from.id}`);
-  const targetUser = targetMsg.from;
-  const targetName = targetUser.username ? `@${targetUser.username}` : (targetUser.first_name || `User ${targetUser.id}`);
-  
-  if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil(sendLogEvent(
-      env,
-      chatId,
-      '🗑️ <b>Message Deleted</b>',
-      `👮 By: ${actorName} (<code>${msg.from.id}</code>)\n👤 Author: ${targetName} (<code>${targetUser.id}</code>)\n💬 Message ID: ${targetMsg.message_id}`
-    ));
-  }
 }
