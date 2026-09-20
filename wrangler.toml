@@ -8,3 +8,9 @@ database_name = "report-bot-db"
 database_id = "7191d4e5-ce85-4078-9f11-2f29f9f39e96"
 
 [vars]
+# Comma-separated Telegram user IDs of bot owners
+# GLOBAL_ADMIN_IDS = "123456789"
+
+# Global fallback notification channel/group ID for report alerts.
+# Per-group override: /settings notification_chat <chat_id>
+# DEFAULT_ADMIN_CHAT_ID = "-1001234567890"

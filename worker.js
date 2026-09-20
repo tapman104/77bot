@@ -59,6 +59,32 @@ function isOwner(userId, env) {
 }
 
 /**
+ * Helper: Check if user has elevated (owner-equivalent) access.
+ * This covers GLOBAL_ADMIN_IDS owners AND any user in approved_admins
+ * across any group (approved admins get full owner-level permissions).
+ * Pass groupId to scope the check to a specific group, or null to check globally.
+ */
+async function isElevated(userId, env, groupId = null) {
+  if (isOwner(userId, env)) return true;
+  try {
+    let row;
+    if (groupId !== null) {
+      row = await env.DB.prepare(
+        'SELECT user_id FROM approved_admins WHERE group_id = ? AND user_id = ?'
+      ).bind(groupId, userId).first();
+    } else {
+      row = await env.DB.prepare(
+        'SELECT user_id FROM approved_admins WHERE user_id = ? LIMIT 1'
+      ).bind(userId).first();
+    }
+    return !!row;
+  } catch (e) {
+    console.error('isElevated DB check failed:', e);
+    return false;
+  }
+}
+
+/**
  * Handle incoming message updates
  */
 async function handleMessage(msg, env, ctx) {
@@ -126,12 +152,15 @@ async function handleMessage(msg, env, ctx) {
     return;
   }
 
+  // Elevated = owner OR approved_admin in this group; used for owner-tier commands
+  const isElevatedUser = await isElevated(senderId, env, chatType !== 'private' ? chatId : null);
+
   switch (command) {
     case '/approvegroup':
-      await handleApproveGroup(chatId, chatType, senderId, argsStr, env);
+      await handleApproveGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser);
       break;
     case '/revokegroup':
-      await handleRevokeGroup(chatId, chatType, senderId, argsStr, env);
+      await handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser);
       break;
     case '/approve':
       await handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env);
@@ -268,14 +297,14 @@ async function getGroupSettings(db, groupId) {
 /**
  * COMMAND: /approvegroup <group_id> (Owner, Private Chat Only)
  */
-async function handleApproveGroup(chatId, chatType, senderId, argsStr, env) {
+async function handleApproveGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false) {
   if (chatType !== 'private') {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in private chat.');
     return;
   }
 
-  if (!isOwner(senderId, env)) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner.');
+  if (!isElevatedUser) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner or approved admins.');
     return;
   }
 
@@ -296,14 +325,14 @@ async function handleApproveGroup(chatId, chatType, senderId, argsStr, env) {
 /**
  * COMMAND: /revokegroup <group_id> (Owner, Private Chat Only)
  */
-async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env) {
+async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false) {
   if (chatType !== 'private') {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in private chat.');
     return;
   }
 
-  if (!isOwner(senderId, env)) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner.');
+  if (!isElevatedUser) {
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner or approved admins.');
     return;
   }
 
@@ -480,7 +509,7 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
     if (parts.length > 0 && parts[0].startsWith('@')) {
       const mention = parts[0];
       reason = parts.slice(1).join(' ');
-      
+
       try {
         const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatMember`;
         const res = await fetch(url, {
@@ -619,35 +648,20 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
     msg.message_id
   );
 
-  // Send Notification to Admins asynchronously using ctx.waitUntil
+  // Send Notification to configured channel/group (or fallback) asynchronously
   const adminNotificationPromise = (async () => {
     try {
-      let adminIds = [];
-      const { results: approvedAdmins } = await env.DB.prepare(
-        'SELECT user_id FROM approved_admins WHERE group_id = ?'
-      ).bind(chatId).all();
+      // Resolve notification destination:
+      // 1. group_settings.notification_chat_id (per-group override)
+      // 2. env.DEFAULT_ADMIN_CHAT_ID (global fallback from wrangler.toml [vars])
+      // 3. The group itself (last-resort fallback)
+      const settings = await getGroupSettings(env.DB, chatId);
+      const notifyDest = settings.notification_chat_id
+        || (env.DEFAULT_ADMIN_CHAT_ID ? parseInt(env.DEFAULT_ADMIN_CHAT_ID, 10) : null)
+        || chatId;
 
-      if (approvedAdmins && approvedAdmins.length > 0) {
-        adminIds = approvedAdmins.map(a => a.user_id);
-      } else {
-        const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId })
-        });
-        const data = await res.json();
-        if (data.ok && data.result) {
-          for (const admin of data.result) {
-            const user = admin.user;
-            if (user.is_bot || admin.is_anonymous) continue;
-            adminIds.push(user.id);
-          }
-        }
-      }
-
-      const reportedLink = targetUser.username 
-        ? `@${targetUser.username}` 
+      const reportedLink = targetUser.username
+        ? `@${targetUser.username}`
         : `<a href="tg://user?id=${targetUser.id}">${escapeHtml(targetUser.first_name || 'User ' + targetUser.id)}</a>`;
 
       let messageLinkLine = '';
@@ -657,7 +671,7 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
         messageLinkLine = `\n💬 <b>Message:</b> https://t.me/c/${strippedChatId}/${targetMessageId}`;
       }
 
-      const adminAlertText = 
+      const adminAlertText =
         `🚨 <b>New Report</b>\n\n` +
         `👤 <b>Reported:</b> ${reportedLink}\n` +
         `📝 <b>Reason:</b> ${escapeHtml(reason)}\n` +
@@ -665,15 +679,9 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
         messageLinkLine +
         `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
 
-      for (const adminId of adminIds) {
-        try {
-          await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, adminAlertText);
-        } catch (err) {
-          console.error(`Failed to send DM to admin ${adminId}:`, err);
-        }
-      }
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, notifyDest, adminAlertText);
     } catch (err) {
-      console.error('Failed to process admin notifications:', err);
+      console.error('Failed to process admin notification:', err);
     }
   })();
 
@@ -723,7 +731,7 @@ async function handleResolveReportDetails(chatId, reportIdStr, env) {
     return;
   }
 
-  const text = 
+  const text =
     `🔎 <b>Report Details #${report.id}</b>\n\n` +
     `<b>Status:</b> ${report.status.toUpperCase()}\n` +
     `<b>Group:</b> ${escapeHtml(report.group_name)} (${report.group_id})\n` +
@@ -905,7 +913,7 @@ async function handleSettings(chatId, argsStr, env) {
   const current = await getGroupSettings(env.DB, chatId);
 
   if (!argsStr) {
-    const text = 
+    const text =
       `⚙️ <b>Group Settings</b>\n\n` +
       `• <b>Cooldown:</b> ${current.cooldown_seconds}s\n` +
       `• <b>Ignore Bots:</b> ${current.ignore_bots ? 'Yes' : 'No'}\n` +
@@ -1006,7 +1014,7 @@ async function handleClearReports(chatId, argsStr, env) {
  * COMMAND: /help
  */
 async function handleHelp(chatId, env) {
-  const text = 
+  const text =
     `🛡️ <b>Telegram Report Bot - Administrator Manual</b>\n\n` +
     `<b>Public Commands:</b>\n` +
     `• <code>/report [reason]</code> - Report user by reply or <code>/report @username [reason]</code>\n\n` +
