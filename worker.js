@@ -28,18 +28,15 @@ export default {
       return new Response('Internal configuration error', { status: 500 });
     }
 
-    // Optional: Secret Token Verification
-    if (env.TELEGRAM_SECRET_TOKEN) {
-      const token = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-      if (token !== env.TELEGRAM_SECRET_TOKEN) {
-        return new Response('Unauthorized', { status: 401 });
-      }
-    }
 
     try {
       const update = await request.json();
       if (update.message) {
         await handleMessage(update.message, env, ctx);
+      } else if (update.chat_member) {
+        ctx.waitUntil(handleChatMemberUpdate(update.chat_member, env));
+      } else if (update.callback_query) {
+        await handleCallbackQuery(update.callback_query, env);
       }
       return new Response('OK', { status: 200 });
     } catch (err) {
@@ -172,7 +169,7 @@ async function handleMessage(msg, env, ctx) {
       await handleListAdmins(chatId, chatType, env);
       break;
     case '/reports':
-      await handleListReports(chatId, env);
+      await handleListReports(chatId, chatType, env);
       break;
     case '/view':
       await handleResolveReportDetails(chatId, argsStr, env);
@@ -187,7 +184,7 @@ async function handleMessage(msg, env, ctx) {
       await handleUserHistory(chatId, msg, argsStr, env);
       break;
     case '/stats':
-      await handleStats(chatId, env);
+      await handleStats(chatId, chatType, env);
       break;
     case '/settings':
       await handleSettings(chatId, argsStr, env);
@@ -201,6 +198,122 @@ async function handleMessage(msg, env, ctx) {
     case '/help':
       await handleHelp(chatId, env);
       break;
+  }
+}
+
+async function handleCallbackQuery(callbackQuery, env) {
+  const data = callbackQuery.data;
+  const chatId = callbackQuery.message.chat.id;
+  const callbackQueryId = callbackQuery.id;
+
+  if (data && data.startsWith('reports:')) {
+    const groupIdStr = data.split(':')[1];
+    const groupId = parseInt(groupIdStr, 10);
+
+    // Answer callback query so it doesn't spin
+    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId })
+    });
+
+    // Fetch open reports for this group
+    const { results } = await env.DB.prepare(
+      'SELECT id, reported_username, reason, created_at FROM reports WHERE group_id = ? AND status = "open" ORDER BY id DESC LIMIT 10'
+    ).bind(groupId).all();
+
+    const totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "open"').bind(groupId).first();
+
+    if (!results || results.length === 0) {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `✅ No open reports found for group <code>${groupId}</code>.`);
+      return;
+    }
+
+    let text = `📋 <b>Open Reports for ${groupId}</b> (${totalRow ? totalRow.count : 0}):\n\n`;
+    for (const r of results) {
+      text += `• <b>#${r.id}</b> | User: ${escapeHtml(r.reported_username)} | Reason: <i>${escapeHtml(r.reason)}</i>\n`;
+    }
+    text += '\nUse <code>/report &lt;Report ID&gt;</code> or <code>/view &lt;Report ID&gt;</code> to view details.';
+
+    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, text);
+  }
+}
+
+async function handleChatMemberUpdate(update, env) {
+  const chatId = update.chat.id;
+  const groupTitle = update.chat.title || String(chatId);
+  const actor = update.from;
+  const target = update.new_chat_member.user;
+  const oldStatus = update.old_chat_member.status;
+  const newStatus = update.new_chat_member.status;
+
+  const botIdStr = env.TELEGRAM_BOT_TOKEN.split(':')[0];
+  if (String(target.id) === botIdStr) return;
+
+  const approvedGroup = await env.DB.prepare(
+    'SELECT group_id FROM approved_groups WHERE group_id = ?'
+  ).bind(chatId).first();
+  if (!approvedGroup) return;
+
+  const isKick   = newStatus === 'kicked' && oldStatus !== 'kicked';
+  const isMute   = newStatus === 'restricted' && oldStatus !== 'restricted';
+  const isUnmute = oldStatus === 'restricted' && (newStatus === 'member' || newStatus === 'administrator');
+  const isUnban  = oldStatus === 'kicked'     && (newStatus === 'member' || newStatus === 'left');
+
+  let emoji, action;
+  if      (isKick)   { emoji = '🔨'; action = 'Banned/Kicked'; }
+  else if (isMute)   { emoji = '🔇'; action = 'Muted/Restricted'; }
+  else if (isUnmute) { emoji = '🔊'; action = 'Unmuted'; }
+  else if (isUnban)  { emoji = '✅'; action = 'Unbanned'; }
+  else return;
+
+  const actorLink = actor.username
+    ? `@${actor.username}`
+    : `<a href="tg://user?id=${actor.id}">${escapeHtml(actor.first_name || 'Admin')}</a>`;
+  const targetLink = target.username
+    ? `@${target.username}`
+    : `<a href="tg://user?id=${target.id}">${escapeHtml(target.first_name || 'User')}</a>`;
+
+  let durationLine = '';
+  if (isMute && update.new_chat_member.until_date) {
+    const until = new Date(update.new_chat_member.until_date * 1000).toUTCString();
+    durationLine = `\n⏰ <b>Until:</b> ${until}`;
+  }
+
+  const alertText =
+    `${emoji} <b>Admin Action: ${action}</b>\n\n` +
+    `👮 <b>By:</b> ${actorLink}\n` +
+    `👤 <b>Target:</b> ${targetLink}` +
+    durationLine +
+    `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
+
+  let adminIds = [];
+  const { results: approvedAdmins } = await env.DB.prepare(
+    'SELECT user_id FROM approved_admins WHERE group_id = ?'
+  ).bind(chatId).all();
+
+  if (approvedAdmins && approvedAdmins.length > 0) {
+    adminIds = approvedAdmins.map(a => a.user_id);
+  } else {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId })
+    });
+    const data = await res.json();
+    if (data.ok && data.result) {
+      for (const a of data.result) {
+        if (!a.user.is_bot && !a.is_anonymous) adminIds.push(a.user.id);
+      }
+    }
+  }
+
+  for (const adminId of adminIds) {
+    try {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, adminId, alertText);
+    } catch (e) {
+      console.error(`Failed DM to admin ${adminId}:`, e);
+    }
   }
 }
 
@@ -227,6 +340,24 @@ async function sendTelegramMessage(botToken, chatId, text, replyToMessageId = nu
   return await res.json();
 }
 
+async function sendTelegramMessageWithKeyboard(botToken, chatId, text, replyMarkup, parseMode = 'HTML') {
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const payload = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: parseMode,
+    disable_web_page_preview: true,
+    reply_markup: replyMarkup
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return await res.json();
+}
+
 /**
  * Helper: Verify Admin Status (Telegram admin check + D1 approved_admins check)
  */
@@ -237,8 +368,7 @@ async function checkIsAdmin(botToken, chatId, userId, chatType, env) {
   }
 
   if (chatType === 'private') {
-    // Non-owner in private chat is denied
-    return false;
+    return await isElevated(userId, env, null);
   }
 
   try {
@@ -298,11 +428,6 @@ async function getGroupSettings(db, groupId) {
  * COMMAND: /approvegroup <group_id> (Owner, Private Chat Only)
  */
 async function handleApproveGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false) {
-  if (chatType !== 'private') {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in private chat.');
-    return;
-  }
-
   if (!isElevatedUser) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner or approved admins.');
     return;
@@ -326,11 +451,6 @@ async function handleApproveGroup(chatId, chatType, senderId, argsStr, env, isEl
  * COMMAND: /revokegroup <group_id> (Owner, Private Chat Only)
  */
 async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isElevatedUser = false) {
-  if (chatType !== 'private') {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in private chat.');
-    return;
-  }
-
   if (!isElevatedUser) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ Command restricted to the bot owner or approved admins.');
     return;
@@ -355,11 +475,6 @@ async function handleRevokeGroup(chatId, chatType, senderId, argsStr, env, isEle
  * COMMAND: /approve <user_id> (Approved Admins, Group Chat Only)
  */
 async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env) {
-  if (chatType === 'private') {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat.');
-    return;
-  }
-
   let targetUserId = null;
   const cleanArgs = argsStr.trim();
 
@@ -374,33 +489,42 @@ async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env)
     return;
   }
 
-  // 1. Verify target is a Telegram admin of this group via getChatMember
-  let isTgAdmin = false;
-  try {
-    const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatMember`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, user_id: targetUserId })
-    });
-    const data = await res.json();
-    if (data.ok && data.result) {
-      const status = data.result.status;
-      isTgAdmin = status === 'administrator' || status === 'creator';
+  if (chatType !== 'private') {
+    // 1. Verify target is a Telegram admin of this group via getChatMember
+    let isTgAdmin = false;
+    try {
+      const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatMember`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, user_id: targetUserId })
+      });
+      const data = await res.json();
+      if (data.ok && data.result) {
+        const status = data.result.status;
+        isTgAdmin = status === 'administrator' || status === 'creator';
+      }
+    } catch (err) {
+      console.error('getChatMember failed in handleApproveAdmin:', err);
     }
-  } catch (err) {
-    console.error('getChatMember failed in handleApproveAdmin:', err);
-  }
 
-  if (!isTgAdmin) {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `⚠️ User ${targetUserId} is not a Telegram admin of this group.`);
-    return;
+    if (!isTgAdmin) {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `⚠️ User ${targetUserId} is not a Telegram admin of this group.`);
+      return;
+    }
   }
 
   // 2. Check if already approved
-  const existing = await env.DB.prepare(
-    'SELECT user_id FROM approved_admins WHERE group_id = ? AND user_id = ?'
-  ).bind(chatId, targetUserId).first();
+  let existing;
+  if (chatType === 'private') {
+    existing = await env.DB.prepare(
+      'SELECT user_id FROM approved_admins WHERE user_id = ?'
+    ).bind(targetUserId).first();
+  } else {
+    existing = await env.DB.prepare(
+      'SELECT user_id FROM approved_admins WHERE group_id = ? AND user_id = ?'
+    ).bind(chatId, targetUserId).first();
+  }
 
   if (existing) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `ℹ️ User ${targetUserId} is already an approved admin.`);
@@ -408,10 +532,16 @@ async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env)
   }
 
   // 3. Insert into approved_admins
-  await env.DB.prepare(`
-    INSERT INTO approved_admins (group_id, user_id, approved_by) VALUES (?, ?, ?)
-    ON CONFLICT(group_id, user_id) DO UPDATE SET approved_by = excluded.approved_by, approved_at = CURRENT_TIMESTAMP
-  `).bind(chatId, targetUserId, senderId).run();
+  if (chatType === 'private') {
+    await env.DB.prepare(`
+      INSERT INTO approved_admins (user_id, approved_by) VALUES (?, ?)
+    `).bind(targetUserId, senderId).run();
+  } else {
+    await env.DB.prepare(`
+      INSERT INTO approved_admins (group_id, user_id, approved_by) VALUES (?, ?, ?)
+      ON CONFLICT(group_id, user_id) DO UPDATE SET approved_by = excluded.approved_by, approved_at = CURRENT_TIMESTAMP
+    `).bind(chatId, targetUserId, senderId).run();
+  }
 
   const approverUsername = msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || `User ${senderId}`);
   await sendTelegramMessage(
@@ -425,11 +555,6 @@ async function handleApproveAdmin(chatId, chatType, senderId, msg, argsStr, env)
  * COMMAND: /unapprove <user_id> (Approved Admins, Group Chat Only)
  */
 async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, env) {
-  if (chatType === 'private') {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat.');
-    return;
-  }
-
   let targetUserId = null;
   const cleanArgs = argsStr.trim();
 
@@ -444,9 +569,15 @@ async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, en
     return;
   }
 
-  await env.DB.prepare(
-    'DELETE FROM approved_admins WHERE group_id = ? AND user_id = ?'
-  ).bind(chatId, targetUserId).run();
+  if (chatType === 'private') {
+    await env.DB.prepare(
+      'DELETE FROM approved_admins WHERE user_id = ?'
+    ).bind(targetUserId).run();
+  } else {
+    await env.DB.prepare(
+      'DELETE FROM approved_admins WHERE group_id = ? AND user_id = ?'
+    ).bind(chatId, targetUserId).run();
+  }
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, `🗑️ Admin approval for ${targetUserId} revoked.`);
 }
@@ -455,14 +586,18 @@ async function handleUnapproveAdmin(chatId, chatType, senderId, msg, argsStr, en
  * COMMAND: /admins (Approved Admins, Group Chat Only)
  */
 async function handleListAdmins(chatId, chatType, env) {
+  let results;
   if (chatType === 'private') {
-    await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '⚠️ This command can only be used in a group chat.');
-    return;
+    const res = await env.DB.prepare(
+      'SELECT user_id, approved_by, approved_at FROM approved_admins ORDER BY approved_at ASC'
+    ).all();
+    results = res.results;
+  } else {
+    const res = await env.DB.prepare(
+      'SELECT user_id, approved_by, approved_at FROM approved_admins WHERE group_id = ? ORDER BY approved_at ASC'
+    ).bind(chatId).all();
+    results = res.results;
   }
-
-  const { results } = await env.DB.prepare(
-    'SELECT user_id, approved_by, approved_at FROM approved_admins WHERE group_id = ? ORDER BY approved_at ASC'
-  ).bind(chatId).all();
 
   if (!results || results.length === 0) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '👥 <b>Approved Admins:</b>\n<i>None</i>');
@@ -498,11 +633,13 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
   let targetUser = null;
   let targetMessageId = null;
   let reason = argsStr;
+  let reportedMessageText = null;
 
   // Case 1: Reporting via Reply
   if (replyTo) {
     targetUser = replyTo.from;
     targetMessageId = replyTo.message_id;
+    reportedMessageText = replyTo.text || replyTo.caption || '[Media/Non-text]';
   } else {
     // Case 2: Reporting via @username mention in args
     const parts = argsStr.split(' ');
@@ -660,8 +797,31 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
         || (env.DEFAULT_ADMIN_CHAT_ID ? parseInt(env.DEFAULT_ADMIN_CHAT_ID, 10) : null)
         || chatId;
 
-      const reportedLink = targetUser.username
-        ? `@${targetUser.username}`
+      if (approvedAdmins && approvedAdmins.length > 0) {
+        adminIds = approvedAdmins.map(a => a.user_id);
+      } else {
+        const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChatAdministrators`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId })
+        });
+        const data = await res.json();
+        if (data.ok && data.result) {
+          for (const admin of data.result) {
+            const user = admin.user;
+            if (user.is_bot || admin.is_anonymous) continue;
+            adminIds.push(user.id);
+          }
+        }
+      }
+
+      const reporterLink = reporter.username
+        ? `@${reporter.username}`
+        : `<a href="tg://user?id=${reporter.id}">${escapeHtml(reporter.first_name || 'User')}</a>`;
+
+      const reportedLink = targetUser.username 
+        ? `@${targetUser.username}` 
         : `<a href="tg://user?id=${targetUser.id}">${escapeHtml(targetUser.first_name || 'User ' + targetUser.id)}</a>`;
 
       let messageLinkLine = '';
@@ -673,8 +833,10 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
 
       const adminAlertText =
         `🚨 <b>New Report</b>\n\n` +
+        `🕵️ <b>Reporter:</b> ${reporterLink}\n` +
         `👤 <b>Reported:</b> ${reportedLink}\n` +
         `📝 <b>Reason:</b> ${escapeHtml(reason)}\n` +
+        `💬 <b>Message:</b> <i>${escapeHtml(reportedMessageText || 'N/A')}</i>\n` +
         `🆔 <b>Report ID:</b> #${reportId}` +
         messageLinkLine +
         `\n📌 <b>Group:</b> ${escapeHtml(groupTitle)}`;
@@ -695,17 +857,57 @@ async function handleReportCommand(msg, argsStr, env, ctx) {
 /**
  * COMMAND: /reports
  */
-async function handleListReports(chatId, env) {
+async function handleListReports(chatId, chatType, env) {
+  if (chatType === 'private') {
+    // Show inline keyboard with approved groups
+    const { results: groups } = await env.DB.prepare(
+      'SELECT group_id FROM approved_groups'
+    ).all();
+
+    if (!groups || groups.length === 0) {
+      await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '✅ No approved groups found.');
+      return;
+    }
+
+    const { results: groupNames } = await env.DB.prepare(
+      'SELECT DISTINCT group_id, group_name FROM reports WHERE status = "open"'
+    ).all();
+    
+    // Create a map for quick lookup
+    const nameMap = {};
+    for (const row of groupNames) {
+      nameMap[row.group_id] = row.group_name || String(row.group_id);
+    }
+
+    const inline_keyboard = [];
+    for (const g of groups) {
+      const gName = nameMap[g.group_id] || String(g.group_id);
+      inline_keyboard.push([{
+        text: gName,
+        callback_data: `reports:${g.group_id}`
+      }]);
+    }
+
+    // Also get total open reports globally
+    const totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE status = "open"').first();
+    const text = `📋 <b>Open Reports</b> (${totalRow ? totalRow.count : 0} total)\n\nSelect a group to view its open reports:`;
+    
+    await sendTelegramMessageWithKeyboard(env.TELEGRAM_BOT_TOKEN, chatId, text, { inline_keyboard });
+    return;
+  }
+
   const { results } = await env.DB.prepare(
     'SELECT id, reported_username, reason, created_at FROM reports WHERE group_id = ? AND status = "open" ORDER BY id DESC LIMIT 10'
   ).bind(chatId).all();
+
+  const totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "open"').bind(chatId).first();
 
   if (!results || results.length === 0) {
     await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, '✅ No open reports found for this group.');
     return;
   }
 
-  let text = '📋 <b>Open Reports:</b>\n\n';
+  let text = `📋 <b>Open Reports</b> (${totalRow ? totalRow.count : 0}):\n\n`;
   for (const r of results) {
     text += `• <b>#${r.id}</b> | User: ${escapeHtml(r.reported_username)} | Reason: <i>${escapeHtml(r.reason)}</i>\n`;
   }
@@ -869,25 +1071,39 @@ async function handleUserHistory(chatId, msg, argsStr, env) {
 /**
  * COMMAND: /stats
  */
-async function handleStats(chatId, env) {
-  const totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ?').bind(chatId).first();
-  const openRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "open"').bind(chatId).first();
-  const resolvedRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ? AND status = "resolved"').bind(chatId).first();
+async function handleStats(chatId, chatType, env) {
+  let totalRow, topReported, topReporters;
 
-  const { results: topReported } = await env.DB.prepare(`
-    SELECT reported_id, MAX(reported_username) AS reported_username, COUNT(*) AS cnt FROM reports 
-    WHERE group_id = ? GROUP BY reported_id ORDER BY cnt DESC LIMIT 3
-  `).bind(chatId).all();
+  if (chatType === 'private') {
+    totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports').first();
+    const resReported = await env.DB.prepare(`
+      SELECT reported_id, MAX(reported_username) AS reported_username, COUNT(*) AS cnt FROM reports 
+      GROUP BY reported_id ORDER BY cnt DESC LIMIT 3
+    `).all();
+    topReported = resReported.results;
 
-  const { results: topReporters } = await env.DB.prepare(`
-    SELECT reporter_id, MAX(reporter_username) AS reporter_username, COUNT(*) AS cnt FROM reports 
-    WHERE group_id = ? GROUP BY reporter_id ORDER BY cnt DESC LIMIT 3
-  `).bind(chatId).all();
+    const resReporters = await env.DB.prepare(`
+      SELECT reporter_id, MAX(reporter_username) AS reporter_username, COUNT(*) AS cnt FROM reports 
+      GROUP BY reporter_id ORDER BY cnt DESC LIMIT 3
+    `).all();
+    topReporters = resReporters.results;
+  } else {
+    totalRow = await env.DB.prepare('SELECT COUNT(*) as count FROM reports WHERE group_id = ?').bind(chatId).first();
+    const resReported = await env.DB.prepare(`
+      SELECT reported_id, MAX(reported_username) AS reported_username, COUNT(*) AS cnt FROM reports 
+      WHERE group_id = ? GROUP BY reported_id ORDER BY cnt DESC LIMIT 3
+    `).bind(chatId).all();
+    topReported = resReported.results;
 
-  let text = `📊 <b>Group Moderation Statistics</b>\n\n` +
-    `• <b>Total Reports:</b> ${totalRow ? totalRow.count : 0}\n` +
-    `• <b>Open Reports:</b> ${openRow ? openRow.count : 0}\n` +
-    `• <b>Resolved Reports:</b> ${resolvedRow ? resolvedRow.count : 0}\n\n` +
+    const resReporters = await env.DB.prepare(`
+      SELECT reporter_id, MAX(reporter_username) AS reporter_username, COUNT(*) AS cnt FROM reports 
+      WHERE group_id = ? GROUP BY reporter_id ORDER BY cnt DESC LIMIT 3
+    `).bind(chatId).all();
+    topReporters = resReporters.results;
+  }
+
+  let text = `📊 <b>Moderation Statistics</b>\n\n` +
+    `• <b>Total Reports:</b> ${totalRow ? totalRow.count : 0}\n\n` +
     `<b>Most Reported Users:</b>\n`;
 
   if (topReported && topReported.length > 0) {
@@ -1026,15 +1242,19 @@ async function handleHelp(chatId, env) {
     `• <code>/history @user</code> - View user report history\n` +
     `• <code>/stats</code> - Moderation analytics\n` +
     `• <code>/settings</code> - View & edit group settings\n` +
+    `• <code>/settings notification_chat &lt;chat_id&gt;</code> - Set log channel/group for report alerts\n` +
     `• <code>/export [json|csv]</code> - Export group reports\n` +
     `• <code>/clearreports</code> - Delete all group reports\n` +
-    `• <code>/approve user_id</code> - Approve a group admin\n` +
+    `• <code>/approve user_id</code> - Approve an admin\n` +
     `• <code>/unapprove user_id</code> - Revoke admin approval\n` +
-    `• <code>/admins</code> - List approved group admins\n` +
+    `• <code>/admins</code> - List approved admins\n` +
     `• <code>/help</code> - Show this menu\n\n` +
-    `<b>Owner Commands (Private Chat Only):</b>\n` +
+    `<b>Owner Commands:</b>\n` +
     `• <code>/approvegroup &lt;group_id&gt;</code> - Approve a group for bot use\n` +
-    `• <code>/revokegroup &lt;group_id&gt;</code> - Revoke group approval & purge data`;
+    `• <code>/revokegroup &lt;group_id&gt;</code> - Revoke group approval & purge data\n\n` +
+    `💡 <b>Log Channel Setup:</b>\n` +
+    `Add the bot to your log channel as admin, then run:\n` +
+    `<code>/settings notification_chat -100xxxxxxxxxx</code>`;
 
   await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, text);
 }

@@ -1,5 +1,5 @@
 name = "77bot"
-main = "worker.js"
+main = "src/index.js"
 compatibility_date = "2026-08-01"
 
 [[d1_databases]]
@@ -8,9 +8,12 @@ database_name = "report-bot-db"
 database_id = "7191d4e5-ce85-4078-9f11-2f29f9f39e96"
 
 [vars]
-# Comma-separated Telegram user IDs of bot owners
-# GLOBAL_ADMIN_IDS = "123456789"
-
-# Global fallback notification channel/group ID for report alerts.
-# Per-group override: /settings notification_chat <chat_id>
+GLOBAL_ADMIN_IDS = "YOUR_TELEGRAM_USER_ID"
+# Global fallback notification channel/group ID for report alerts (optional)
 # DEFAULT_ADMIN_CHAT_ID = "-1001234567890"
+# OWNER_CHAT_ID is used by set_commands.js only (not the worker)
+
+# Set these via: wrangler secret put <NAME>
+# TELEGRAM_BOT_TOKEN
+# WEBHOOK_SECRET
+
